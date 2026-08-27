@@ -1,18 +1,19 @@
 # Runbook
 
-Что делать с работающим пайплайном: как запустить, за чем следить, что
-означает каждая жалоба и как её чинить. Архитектура и смысл ступеней — в
-[README](README.md), здесь только эксплуатация.
+What to do with a running pipeline: how to start it, what to watch, what
+each complaint means and how to fix it. Architecture and the meaning of
+the stages are in
+[README](README.md); this document is operations only.
 
-## Запуск
+## Startup
 
-### Голая машина
+### Bare machine
 
 ```bash
-make dev                      # venv + зависимости + линтер и тесты
+make dev                      # venv + dependencies + linter and tests
 cp config.example.yaml config.yaml
-$EDITOR config.yaml           # или ключи через GROKBOT_* в окружении
-make check-config             # проверка без запуска, секреты в выводе замаскированы
+$EDITOR config.yaml           # or keys via GROKBOT_* in the environment
+make check-config             # check without starting; secrets in the output are masked
 make run
 ```
 
@@ -25,9 +26,9 @@ docker compose up -d
 docker compose logs -f
 ```
 
-Тома `logs/` и `state/` обязаны быть снаружи контейнера: в `state/` лежат
-открытые позиции и дневные лимиты, и потеря этого файла означает, что после
-перезапуска пайплайн забудет и то, и другое.
+The `logs/` and `state/` volumes MUST live outside the container: `state/`
+holds open positions and daily limits, and losing that file means that after
+a restart the pipeline will forget both.
 
 ### systemd
 
@@ -45,175 +46,179 @@ ExecStart=/opt/grokbot-pumpfun/.venv/bin/python -m src.pipeline --config config.
 Restart=always
 RestartSec=10
 KillSignal=SIGTERM
-TimeoutStopSec=45            # больше, чем ops.shutdown_grace_seconds
+TimeoutStopSec=45            # greater than ops.shutdown_grace_seconds
 [Install]
 WantedBy=multi-user.target
 ```
 
 ### launchd (macOS)
 
-`~/Library/LaunchAgents/com.grokbot.pumpfun.plist`, ключевое:
-`ProgramArguments` — тот же вызов, `KeepAlive` — true, `EnvironmentVariables`
-— `GROKBOT_GROK_API_KEY`. Останов через `launchctl unload` шлёт SIGTERM,
-то есть штатную остановку с сохранением состояния.
+`~/Library/LaunchAgents/com.grokbot.pumpfun.plist`, the key bits:
+`ProgramArguments` — the same invocation, `KeepAlive` — true, `EnvironmentVariables`
+— `GROKBOT_GROK_API_KEY`. Stopping via `launchctl unload` sends SIGTERM,
+i.e. a clean shutdown that persists state.
 
-## Первые сутки
+## First 24 hours
 
-Порядок, который экономит деньги:
+The order that saves money:
 
-1. `mode: dry-run`, сутки работы, потом `make replay`.
-2. Смотреть конверсию: если куплено 0 из тысяч — порог задран или агенты
-   отказывают; если куплено больше десятка в час — порог занижен.
-3. В разбивке причин отсева проверить, что работают все ступени. Если весь
-   отсев на одной — остальные не получают данных.
-4. В средних по компонентам искать всегда-нулевой компонент: это молчащий
-   агент, а не строгий агент.
+1. `mode: dry-run`, a day of operation, then `make replay`.
+2. Watch conversion: if 0 bought out of thousands — the threshold is too high
+   or the agents are rejecting; if more than a dozen are bought per hour —
+   the threshold is too low.
+3. In the reject-reason breakdown, verify that every stage is working. If all
+   rejections land on one stage — the rest are not receiving data.
+4. In per-component averages, look for a component that is always zero: that
+   is a silent agent, not a strict agent.
 
-Только после этого имеет смысл разговор про `live`.
+Only after that does a conversation about `live` make sense.
 
-## За чем следить
+## What to watch
 
 ```bash
-curl -s localhost:8080/healthz | jq        # состояние
-curl -s localhost:8080/metrics             # счётчики для Prometheus
+curl -s localhost:8080/healthz | jq        # status
+curl -s localhost:8080/metrics             # counters for Prometheus
 python scripts/dashboard.py logs/trades.jsonl --watch 5
 ```
 
-`/healthz` отдаёт 200 при `status: ok` и 503 при `degraded` — на это можно
-вешать рестарт-политику. Поля:
+`/healthz` returns 200 when `status: ok` and 503 when `degraded` — you can
+hang a restart policy on that. Fields:
 
-| поле | смысл | когда плохо |
+| field | meaning | when it's bad |
 |---|---|---|
-| `status` | сводка | `degraded` = цепь разомкнута или поток встал |
-| `stalled` | нет событий из сокета дольше 10 минут | `true` — сокет мёртв |
-| `breaker` | `closed` / `half-open` / `open` | `open` — Grok не отвечает |
-| `grok_budget_remaining` | остаток дневных вызовов | 0 — до полуночи UTC агенты молчат |
-| `halted` | дневной лимит убытка выбран | `true` — торговли сегодня не будет |
-| `blind_positions` | позиции без котировок | больше 0 — выходы по ним не работают |
-| `open_positions` | открытые позиции | больше `max_open_positions` быть не может |
-| `in_flight` | токенов в разборе | стабильно на потолке — упёрлись в лимит Grok |
+| `status` | summary | `degraded` = circuit is open or the feed has stalled |
+| `stalled` | no events from the socket for more than 10 minutes | `true` — the socket is dead |
+| `breaker` | `closed` / `half-open` / `open` | `open` — Grok is not responding |
+| `grok_budget_remaining` | remaining daily calls | 0 — until midnight UTC the agents are silent |
+| `halted` | daily loss limit is spent | `true` — there will be no trading today |
+| `blind_positions` | positions without quotes | more than 0 — exits on them do not work |
+| `open_positions` | open positions | cannot exceed `max_open_positions` |
+| `in_flight` | tokens being analyzed | stably at the ceiling — hit the Grok limit |
 
-Строка `жив: ...` в логе раз в `heartbeat_seconds` — то же самое, но в
-журнале, чтобы по нему можно было восстановить историю.
+The `жив: ...` line in the log every `heartbeat_seconds` — the same snapshot,
+but in the journal, so you can reconstruct history from it.
 
-## Уведомления
+## Notifications
 
-При заданном `alerts.webhook_url` (лучше через `GROKBOT_ALERT_WEBHOOK` —
-в URL обычно токен) события приходят во внешний канал: `started`,
-`stopped`, `buy`, `close`, `rug`, `breaker`, `halted`, `stalled`. Набор
-задаётся в `alerts.events`.
+When `alerts.webhook_url` is set (preferably via `GROKBOT_ALERT_WEBHOOK` —
+the URL usually contains a token) events go to an external channel: `started`,
+`stopped`, `buy`, `close`, `rug`, `breaker`, `halted`, `stalled`. The set
+is configured in `alerts.events`.
 
-Состояния сообщаются **на переходе**: `breaker` приходит один раз при
-размыкании и один раз при восстановлении, а не каждую минуту. Поток
-ограничен `max_per_minute`; лишнее выбрасывается и считается в
-`alerts.dropped` в `/healthz`, а не копится в очереди.
+State is reported **on transition**: `breaker` arrives once when the
+circuit opens and once when it recovers, not every minute. The stream
+is rate-limited by `max_per_minute`; extras are dropped and counted in
+`alerts.dropped` in `/healthz`, not queued.
 
-Молчание канала само по себе ничего не значит — проверять живость надо по
-`/healthz`, а не по отсутствию писем. Счётчик `alerts.failed` в `/healthz`
-как раз показывает, сколько уведомлений не ушло.
+Silence on the channel by itself means nothing — check liveness via
+`/healthz`, not by the absence of messages. The `alerts.failed` counter in
+`/healthz` is exactly how many notifications failed to send.
 
-## Инциденты
+## Incidents
 
-### `breaker: open`, в логе «цепь Grok разомкнута»
+### `breaker: open`, log says `цепь Grok разомкнута` (Grok circuit is open)
 
-Столько-то вызовов подряд не удались. Пайплайн перестал звонить в Grok на
-`breaker_cooldown_seconds` и **всё это время не покупает** — все агенты
-отдают пессимистичный результат, чекер отвечает отказом.
+That many consecutive calls failed. The pipeline stopped calling Grok for
+`breaker_cooldown_seconds` and **does not buy the entire time** — every agent
+returns a pessimistic result, the checker answers with a reject.
 
-Проверить: ключ жив (`curl` к api.x.ai), не кончились ли деньги на счёте
-xAI, нет ли 429. Цепь замкнётся сама после кулдауна, разведочный вызов
-покажет, починилось ли.
+Check: the key is alive (`curl` to api.x.ai), the xAI account is not out of
+money, there is no 429. The circuit will close itself after the cooldown; a
+probe call will show whether it recovered.
 
 ### `grok_budget_remaining: 0`
 
-Выбран `ops.max_grok_calls_per_day`. Это защита от того, чтобы всплеск
-лончей не съел месячный бюджет за вечер. До полуночи UTC агенты не
-вызываются. Если это штатная нагрузка — поднять потолок; если нет —
-поднять `filter.min_total_score`, чтобы до агентов доходило меньше.
+`ops.max_grok_calls_per_day` is spent. This is protection against a burst of
+launches eating the monthly budget in one evening. Until midnight UTC the
+agents are not called. If this is normal load — raise the ceiling; if not —
+raise `filter.min_total_score` so fewer tokens reach the agents.
 
 ### `stalled: true`
 
-Из сокета не приходило событий дольше десяти минут. Монитор
-переподключается сам с нарастающей паузой; если `stalled` держится —
-проверить `data.ws_url` и сеть. Открытые позиции при этом всё ещё под
-присмотром стоп-лосса: он ходит по REST, а не по сокету.
+No events have arrived from the socket for more than ten minutes. The monitor
+reconnects on its own with a growing backoff; if `stalled` persists —
+check `data.ws_url` and the network. Open positions are still under
+stop-loss watch: it goes over REST, not the socket.
 
-### `blind_positions` больше нуля
+### `blind_positions` greater than zero
 
-По стольким открытым позициям несколько проходов подряд не приходит цена.
-Это значит, что **правила выхода по ним сейчас не работают**: ни стоп-лосс,
-ни take-profit, ни трейлинг. Проверить провайдера данных (`data.rest_url`),
-лимиты по ключу и сеть. Пока цены нет, позиция живёт сама по себе — это тот
-случай, когда стоит вмешаться руками.
+For this many open positions, several consecutive passes have not produced a
+price. That means **exit rules on them are not working right now**: neither
+stop-loss, nor take-profit, nor trailing stop. Check the data provider
+(`data.rest_url`), key limits, and the network. While there is no price, the
+position lives on its own — this is the case where you should intervene by
+hand.
 
 ### `halted: true`
 
-Дневной лимит убытка выбран. Ничего чинить не нужно, счётчики сбросятся в
-полночь UTC. Открытые позиции продолжают вестись стоп-лоссом.
+The daily loss limit is spent. Nothing to fix; counters reset at
+midnight UTC. Open positions continue to be managed by stop-loss.
 
-### «состояние не читается — отложено в .corrupt»
+### `состояние … не читается … отложено в .corrupt` (state cannot be read — set aside as `.corrupt`)
 
-Файл состояния побился (обычно — диск кончился в момент записи). Пайплайн
-стартовал с чистого листа: **он не знает про открытые позиции**. Открыть
-`state/pipeline.json.corrupt`, вынуть из него список позиций и разобраться
-с ними руками. Пока это не сделано, стоп-лосс по ним не работает.
+The state file is corrupted (usually — the disk filled up at the moment of
+write). The pipeline started from a clean slate: **it does not know about
+open positions**. Open `state/pipeline.json.corrupt`, pull the position list
+out of it, and deal with them by hand. Until that is done, stop-loss on them
+does not work.
 
-### Позиции закрываются не тем правилом, что ожидалось
+### Positions are closing on a different rule than expected
 
-`make replay` печатает причины закрытия. Что это значит:
+`make replay` prints close reasons. What that means:
 
-* почти всё в `max_hold` — рынок не даёт движения, либо `max_hold_seconds`
-  слишком мал для выбранных токенов;
-* почти всё в `trailing_stop` при мелком плюсе — `trailing_stop_pct` уже
-  обычного шума мемкоина, откат ловится на первом же движении;
-* `take_profit` не срабатывает никогда — порог выше, чем реально
-  проходят отобранные токены; смотреть распределение `pnl_pct` в закрытых.
+* almost everything in `max_hold` — the market is not moving, or
+  `max_hold_seconds` is too small for the selected tokens;
+* almost everything in `trailing_stop` at a small profit —
+  `trailing_stop_pct` is already ordinary memecoin noise, the pullback is
+  caught on the first move;
+* `take_profit` never fires — the threshold is higher than the selected
+  tokens actually reach; look at the `pnl_pct` distribution on closed trades.
 
-### Позиции остались открытыми после остановки
+### Positions stayed open after shutdown
 
-При штатной остановке это нормально и в лог пишется предупреждение:
-пайплайн не продаёт всё подряд на выходе. Стоп-лосс по этим позициям не
-работает, пока процесс не поднят снова. Поэтому долгий простой при
-открытых позициях — риск, а не пауза.
+On a clean shutdown this is normal and a warning is written to the log:
+the pipeline does not sell everything on the way out. Stop-loss on these
+positions does not work until the process is up again. So a long idle with
+open positions is a risk, not a pause.
 
-### `executor_not_implemented` в логе
+### `executor_not_implemented` in the log
 
-Включён `mode: live`, но `LiveExecutor` — заглушка по замыслу. Токен прошёл
-все девять ступеней и не был куплен. Либо дописать исполнение, либо
-вернуться в `dry-run`.
+`mode: live` is on, but `LiveExecutor` is a stub by design. The token passed
+all nine stages and was not bought. Either finish the execution path, or
+go back to `dry-run`.
 
-### Конфиг не принят на старте
+### Config rejected at startup
 
-Сообщение перечисляет все проблемы разом. Это не придирка: каждое из них —
-либо нерабочая настройка (нулевой лимит), либо небезопасная (live без
-ключа кошелька). `make check-config` показывает то же самое, не запуская
-торговлю.
+The message lists every problem at once. This is not nitpicking: each one is
+either a non-working setting (a zero limit) or an unsafe one (live without
+a wallet key). `make check-config` shows the same thing without starting
+trading.
 
-## Обновление
+## Update
 
 ```bash
 git pull
-make check                # линтер, типы, тесты — до перезапуска, не после
-systemctl restart grokbot # или docker compose up -d --build
+make check                # linter, types, tests — before restart, not after
+systemctl restart grokbot # or docker compose up -d --build
 ```
 
-Состояние переживает перезапуск: позиции восстановятся, счётчики дня и
-расход Grok продолжатся с того же места. Формат состояния версионирован
-(`version` в файле); при несовпадении версии счётчики дня сбрасываются, а
-позиции читаются.
+State survives restart: positions are restored, the day's counters and
+Grok spend continue from the same place. The state format is versioned
+(`version` in the file); on a version mismatch the day's counters reset, and
+positions are still read.
 
-## Бэкап
+## Backup
 
-Резервировать `state/pipeline.json` (позиции — это деньги) и `logs/*.jsonl`
-(без них не посчитать результат). Конфиг с ключами не бэкапить в общие
-хранилища — ключи проще перевыпустить.
+Back up `state/pipeline.json` (positions are money) and `logs/*.jsonl`
+(without them you cannot compute results). Do not back up a config with keys
+to shared storage — keys are easier to reissue.
 
-## Чек-лист перед переходом в live
+## Checklist before going live
 
-- [ ] сутки в `dry-run` отработаны, `replay` разобран
-- [ ] `LiveExecutor.buy` и `.sell` дописаны и протестированы отдельно
-- [ ] кошелёк отдельный, на нём только та сумма, которую не жалко
-- [ ] `risk.*` перепроверены на живых числах, а не на дефолтах
-- [ ] `state/` на диске, который переживёт перезапуск машины
-- [ ] `/healthz` заведён в мониторинг, алерт на 503 настроен
-- [ ] `--i-understand-the-risk` добавлен в unit-файл осознанно
+- [ ] a day in `dry-run` completed, `replay` reviewed
+- [ ] `LiveExecutor.buy` and `.sell` implemented and tested separately
+- [ ] a separate wallet, holding only the amount you can afford to lose
+- [ ] `risk.*` rechecked against live numbers, not defaults
+- [ ] `state/` on a disk that will survive a machine restart
+- [ ] `/healthz` wired into monitoring, alert on 503 configured
+- [ ] `--i-understand-the-risk` added to the unit file deliberately
