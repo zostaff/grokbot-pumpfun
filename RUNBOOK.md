@@ -116,7 +116,7 @@ Silence on the channel by itself means nothing — check liveness via
 
 ## Incidents
 
-### `breaker: open`, log says the Grok circuit is open
+### `breaker: open`, log says `цепь Grok разомкнута` (Grok circuit is open)
 
 That many consecutive calls failed. The pipeline stopped calling Grok for
 `breaker_cooldown_seconds` and **does not buy the entire time** — every agent
@@ -154,7 +154,7 @@ hand.
 The daily loss limit is spent. Nothing to fix; counters reset at
 midnight UTC. Open positions continue to be managed by stop-loss.
 
-### "state cannot be read — set aside as .corrupt"
+### `состояние … не читается … отложено в .corrupt` (state cannot be read — set aside as `.corrupt`)
 
 The state file is corrupted (usually — the disk filled up at the moment of
 write). The pipeline started from a clean slate: **it does not know about
